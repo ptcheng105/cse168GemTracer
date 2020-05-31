@@ -124,52 +124,6 @@ float getPDF(float3 Wi, float t, float3 h) {
     return result;
 }
 
-float3 directLightNEE() {
-    Config cf = config[0];
-    float3 result = make_float3(0, 0, 0);
-    //direction lighting term
-    for (int i = 0; i < qlights.size(); i++)
-    {
-        QuadLight light = qlights[i];
-        //generate random samples points to the light and add them up
-        float3 summed_samples = make_float3(0);
-        //not using stratification pretty much the same expect for the loop
-        for (int j = 0; j < light.sampleCount; j++) {
-            float ran1 = rnd(payload.seed);
-            float ran2 = rnd(payload.seed);
-            float3 lightPoint = light.a + ran1 * light.ab + ran2 * light.ac;
-            float3 lightDir = normalize(lightPoint - attrib.intersection);
-            float lightDist = length(lightPoint - attrib.intersection);
-            ShadowPayload shadowPayload;
-            shadowPayload.isVisible = true;
-            Ray shadowRay = make_Ray(attrib.intersection + lightDir * cf.epsilon,
-                lightDir, 1, cf.epsilon, lightDist - (2 * cf.epsilon));
-            rtTrace(root, shadowRay, shadowPayload);
-
-            // check visibility first
-            if (shadowPayload.isVisible)
-            {
-                //calculate BRDF 
-                float3 reflected = reflect(-attrib.wo, attrib.normal);
-                float3 f = getBRDF(lightDir);
-
-                //calculate Geo term
-                float3 lightNormal = normalize(cross(light.ac, light.ab));
-                float nDotWi = fmaxf(dot(attrib.normal, lightDir), 0);
-                float nlDotWi = fmaxf(dot(-lightNormal, lightDir), 0);
-                float power = pow(lightDist, 2.0f);
-                float g = nDotWi * nlDotWi / power;
-                //combine all terms for this sample and add it to the summed_samples
-                summed_samples += (f * g);
-            }
-        }
-        //now we have all the sample, find the combined light
-        float area = length(light.ab) * length(light.ac);
-        result += light.intensity * area * summed_samples / light.sampleCount;
-    }
-    return result;
-}
-
 float Pdf_BRDF(float3 wi) {
     MaterialValue mv = attrib.mv;
     Config cf = config[0];
@@ -442,8 +396,20 @@ RT_PROGRAM void closestHit()
         
     }
     else {//surface reflection
-        if (cf.useNEE == 0) {//not using NEE
-        //add emission term to result if it is the bottom side of the light geometry
+        if (payload.done == true) {//terminate for direct ray
+            float nDotwo = dot(attrib.normal, attrib.wo);
+            if (nDotwo > 0) {
+                payload.radiance = make_float3(0, 0, 0);
+            }
+            else {
+                payload.radiance = mv.emission * payload.throughput;
+            }
+            payload.nextIntersection = attrib.intersection;
+            payload.lightID = attrib.lightID;
+            return;
+        }
+        if (payload.depth == 0) {//first intersection
+            //add emission term to result if it is the bottom side of the light geometry
             float nDotwo = dot(attrib.normal, attrib.wo);
             if (nDotwo > 0) {
                 result += make_float3(0, 0, 0);
@@ -451,66 +417,16 @@ RT_PROGRAM void closestHit()
             else {
                 result += mv.emission;
             }
-            if (mv.emission.x != 0 || mv.emission.y != 0 || mv.emission.z != 0) {
-                payload.radiance = result * payload.throughput;
-                payload.done = true;
-                return;
-            }
         }
-        else if (cf.useNEE == 1) { //using NEE
-            //emission term
-            if (payload.depth == 0) {//first intersection
-                //add emission term to result if it is the bottom side of the light geometry
-                float nDotwo = dot(attrib.normal, attrib.wo);
-                if (nDotwo > 0) {
-                    result += make_float3(0, 0, 0);
-                }
-                else {
-                    result += mv.emission;
-                }
-            }
-            //stop tracing path if it hit a light source
-            if (mv.emission.x != 0 || mv.emission.y != 0 || mv.emission.z != 0) {
-                payload.radiance = result;
-                payload.done = true;
-                return;
-            }
+        if (mv.emission.x != 0 || mv.emission.y != 0 || mv.emission.z != 0) {
+            payload.radiance = result * payload.throughput;
+            payload.done = true;
+            return;
+        }
 
-            result += directLightNEE();
-        }
-        else if (cf.useNEE == 2) {//using MIS
-            if (payload.done == true) {//terminate for direct ray
-                float nDotwo = dot(attrib.normal, attrib.wo);
-                if (nDotwo > 0) {
-                    payload.radiance = make_float3(0, 0, 0);
-                }
-                else {
-                    payload.radiance = mv.emission * payload.throughput;
-                }
-                payload.nextIntersection = attrib.intersection;
-                payload.lightID = attrib.lightID;
-                return;
-            }
-            if (payload.depth == 0) {//first intersection
-                //add emission term to result if it is the bottom side of the light geometry
-                float nDotwo = dot(attrib.normal, attrib.wo);
-                if (nDotwo > 0) {
-                    result += make_float3(0, 0, 0);
-                }
-                else {
-                    result += mv.emission;
-                }
-            }
-            if (mv.emission.x != 0 || mv.emission.y != 0 || mv.emission.z != 0) {
-                payload.radiance = result * payload.throughput;
-                payload.done = true;
-                return;
-            }
-
-            float3 NEE_value = DLNEE();
-            float3 BRDF_value = DLBRDF();
-            result += NEE_value + BRDF_value;
-        }
+        float3 NEE_value = DLNEE();
+        float3 BRDF_value = DLBRDF();
+        result += NEE_value + BRDF_value;
 
         payload.radiance = result * payload.throughput;
         payload.origin = attrib.intersection;
